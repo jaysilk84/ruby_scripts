@@ -1,0 +1,112 @@
+#!/usr/bin/env ruby
+
+require "open-uri"
+require "json"
+require "optparse"
+
+# encapsulate humanizing
+class Size
+  attr_reader :value, :label
+
+  # accepted sizes and their exponent
+  @@sizes = { b: 0, kb: 1 , mb: 2, gb: 3 }
+  @@base  = 1024
+
+  def initialize (value_in_bytes)
+    @value = value_in_bytes
+    @label = :b
+
+    @exp   = Math.log(value_in_bytes, @@base).to_i
+    @label = @@sizes.key(@exp)
+    return
+    
+
+    #exp = Math.log10(value_in_bytes)
+    #@@sizes.each do |type|
+    #  if exp > type[1] then @exp = type[1]; @label = type[0] end
+    #end
+  end
+
+  # humanized string with label
+  def to_s 
+    return "#{'%10.2f' %to_size(nil)}#{@label}"
+  end
+
+  # float based on passed in size (nil humanizes)
+  def to_size(size)
+    return @value.to_f / (@@base**@@sizes[size.intern]) if !size.nil?
+    return @value.to_f / (@@base**@exp)  
+  end
+
+  def self.sizes
+    return @@sizes.keys
+  end
+
+  private
+  attr_accessor :exp
+  attr_writer :value, :label  
+end
+
+# container for index stats
+class Index
+  attr_reader :docCount, :indexSize, :indexName, :perDocSize
+  
+  def initialize (docCount, indexSize, indexName)
+    @docCount  = docCount
+    @indexSize = Size.new(indexSize)
+    @indexName = indexName
+    @perDocSize = Size.new(indexSize/docCount)
+  end
+end
+
+# do commandline parsing
+options = {:host => "localhost", :port => "9200" }
+
+op = OptionParser.new do |opts|
+  opts.banner = "Gets document sizes from ElasticSearch\nUsage: #{File.basename($0)} [options]"
+  opts.on("-h HOST", "--host=HOST", "elasticsearch host")                      { |v| options[:host] = v.strip }
+  opts.on("-p PORT", "--port=PORT", "elasticsearch port")                      { |v| options[:port] = v.strip }
+  opts.on("-s SIZE", "--size=SIZE", "display sizes in b|kb|mb|gb", Size.sizes) { |v| options[:size] = v.intern }
+  opts.on_tail("-?", "--help", "show this help") do
+    puts opts
+    exit
+  end
+end.parse!
+
+# read the statistics from an ES index
+buffer = open("http://#{options[:host]}:#{options[:port]}/_stats/docs,store").read()
+resp = JSON.parse(buffer);
+
+indexes = Array.new
+
+# create index objects so we can sort them
+resp['indices'].each do |index| 
+  docCount = index[1]['primaries']['docs']['count']
+  if docCount == 0 then next end
+  indexes.push(Index.new(docCount, index[1]['primaries']['store']['size_in_bytes'], index[0]))
+end
+
+# sort and print
+indexes = indexes.sort_by {|i| i.perDocSize.value}.reverse!
+
+# header
+printf "%-35s %17s %15s %17s\n", "index name", "doc size", "doc count", "index size"
+
+indexes.each do |i|
+  # formated numbers case
+  printf "%-35s %15.2f%-2s %15d %15.2f%-2s\n",  
+    i.indexName, 
+    i.perDocSize.to_size(options[:size]),   
+    options[:size] || i.perDocSize.label, 
+    i.docCount, 
+    i.indexSize.to_size(options[:size]),  
+    options[:size] || i.indexSize.label if options[:size] != :b
+  # bytes is special case
+  printf "%-35s %17d %15d %17d\n",
+    i.indexName, 
+    i.perDocSize.to_size(options[:size]), 
+    i.docCount, 
+    i.indexSize.to_size(options[:size]) if options[:size] == :b
+end
+
+
