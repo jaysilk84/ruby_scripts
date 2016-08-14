@@ -5,57 +5,46 @@ require "json"
 require "optparse"
 
 # encapsulate humanizing
-class Size
-  attr_reader :value, :label
+class Unit
+  attr_reader :value, :label, :value_in_bytes
 
   # accepted sizes and their exponent
-  @@sizes = { b: 0, kb: 1 , mb: 2, gb: 3 }
+  @@units = { b: 0, kb: 1 , mb: 2, gb: 3 }
   @@base  = 1024
 
   def initialize (value_in_bytes)
-    @value = value_in_bytes
-    @label = :b
+    exp   = Math.log(value_in_bytes, @@base).to_i
 
-    @exp   = Math.log(value_in_bytes, @@base).to_i
-    @label = @@sizes.key(@exp)
-    return
-    
-
-    #exp = Math.log10(value_in_bytes)
-    #@@sizes.each do |type|
-    #  if exp > type[1] then @exp = type[1]; @label = type[0] end
-    #end
+    @value_in_bytes = value_in_bytes
+    @value = value_in_bytes.to_f / (@@base**exp)
+    @label = @@units.key(exp)
   end
 
-  # humanized string with label
-  def to_s 
-    return "#{'%10.2f' %to_size(nil)}#{@label}"
+  def self.units
+    return @@units.keys
   end
 
-  # float based on passed in size (nil humanizes)
-  def to_size(size)
-    return @value.to_f / (@@base**@@sizes[size.intern]) if !size.nil?
-    return @value.to_f / (@@base**@exp)  
-  end
+end
 
-  def self.sizes
-    return @@sizes.keys
+# display a value in an explicit unit
+class ExplicitUnit < Unit
+  def initialize(value_in_bytes, size)
+    super(value_in_bytes)
+    # the base will humanize by default, this will override that
+    @label = size
+    @value = value_in_bytes.to_f / (@@base**@@units[size])
   end
-
-  private
-  attr_accessor :exp
-  attr_writer :value, :label  
 end
 
 # container for index stats
 class Index
-  attr_reader :docCount, :indexSize, :indexName, :perDocSize
+  attr_reader :doc_count, :index_size, :index_name, :per_doc_size
   
-  def initialize (docCount, indexSize, indexName)
-    @docCount  = docCount
-    @indexSize = Size.new(indexSize)
-    @indexName = indexName
-    @perDocSize = Size.new(indexSize/docCount)
+  def initialize (doc_count, index_size, index_name, units)
+    @doc_count    = doc_count
+    @index_size   = units.nil? ? Unit.new(index_size) : ExplicitUnit.new(index_size, units)
+    @index_name   = index_name
+    @per_doc_size = units.nil? ? Unit.new(index_size/doc_count) : ExplicitUnit.new(index_size/doc_count, units)
   end
 end
 
@@ -66,7 +55,7 @@ op = OptionParser.new do |opts|
   opts.banner = "Gets document sizes from ElasticSearch\nUsage: #{File.basename($0)} [options]"
   opts.on("-h HOST", "--host=HOST", "elasticsearch host")                      { |v| options[:host] = v.strip }
   opts.on("-p PORT", "--port=PORT", "elasticsearch port")                      { |v| options[:port] = v.strip }
-  opts.on("-s SIZE", "--size=SIZE", "display sizes in b|kb|mb|gb", Size.sizes) { |v| options[:size] = v.intern }
+  opts.on("-s SIZE", "--size=SIZE", "display sizes in b|kb|mb|gb", Unit.units) { |v| options[:size] = v.intern }
   opts.on_tail("-?", "--help", "show this help") do
     puts opts
     exit
@@ -74,20 +63,22 @@ op = OptionParser.new do |opts|
 end.parse!
 
 # read the statistics from an ES index
-buffer = open("http://#{options[:host]}:#{options[:port]}/_stats/docs,store").read()
-resp = JSON.parse(buffer);
+buffer = open("http://#{options[:host]}:#{options[:port]}/_stats/docs,store").read
+resp = JSON.parse(buffer)
 
 indexes = Array.new
 
 # create index objects so we can sort them
 resp['indices'].each do |index| 
-  docCount = index[1]['primaries']['docs']['count']
-  if docCount == 0 then next end
-  indexes.push(Index.new(docCount, index[1]['primaries']['store']['size_in_bytes'], index[0]))
+  doc_count = index[1]['primaries']['docs']['count']
+  if doc_count == 0
+    next
+  end
+  indexes.push(Index.new(doc_count, index[1]['primaries']['store']['size_in_bytes'], index[0], options[:size]))
 end
 
 # sort and print
-indexes = indexes.sort_by {|i| i.perDocSize.value}.reverse!
+indexes = indexes.sort_by {|i| i.per_doc_size.value_in_bytes}.reverse!
 
 # header
 printf "%-35s %17s %15s %17s\n", "index name", "doc size", "doc count", "index size"
@@ -95,18 +86,18 @@ printf "%-35s %17s %15s %17s\n", "index name", "doc size", "doc count", "index s
 indexes.each do |i|
   # formated numbers case
   printf "%-35s %15.2f%-2s %15d %15.2f%-2s\n",  
-    i.indexName, 
-    i.perDocSize.to_size(options[:size]),   
-    options[:size] || i.perDocSize.label, 
-    i.docCount, 
-    i.indexSize.to_size(options[:size]),  
-    options[:size] || i.indexSize.label if options[:size] != :b
+    i.index_name,
+    i.per_doc_size.value,
+    i.per_doc_size.label,
+    i.doc_count,
+    i.index_size.value,
+    i.index_size.label if options[:size] != :b
   # bytes is special case
   printf "%-35s %17d %15d %17d\n",
-    i.indexName, 
-    i.perDocSize.to_size(options[:size]), 
-    i.docCount, 
-    i.indexSize.to_size(options[:size]) if options[:size] == :b
+    i.index_name,
+    i.per_doc_size.value,
+    i.doc_count,
+    i.index_size.value if options[:size] == :b
 end
 
 
